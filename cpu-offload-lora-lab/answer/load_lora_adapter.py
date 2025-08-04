@@ -1,11 +1,20 @@
-from huggingface_hub import snapshot_download
+"""
+LoRA adapter loader script.
+
+This script provides:
+- LoRAModelManager: loads and manages LoRA weights from safetensors files.
+- inspect_safetensors: introspects a safetensors file, printing metadata and tensor shapes.
+- CLI entry point: downloads a LoRA adapter, inspects it, and runs basic tests.
+"""
 
 import os
-from safetensors import safe_open
-from typing import Optional, Tuple
 import json
+from typing import Optional, Tuple
 
+from safetensors import safe_open
+from huggingface_hub import snapshot_download
 import torch
+
 from utils import test
 
 
@@ -34,12 +43,21 @@ class LoRAModelManager:
             if not lora_dir:
                 raise ValueError("First init requires lora_dir.")
             cls._instance = super().__new__(cls)
+            cls._instance._lora_dir = lora_dir
             cls._instance._init_weights()
             cls._instance._load_weights(lora_dir)
+        else:
+            if lora_dir is not None and lora_dir != cls._instance._lora_dir:
+                raise ValueError(f"LoRAModelManager already initialized with lora_dir={cls._instance._lora_dir}, cannot reinitialize with different lora_dir={lora_dir}")
         return cls._instance
 
     # Initializes the nested dictionary structure to store LoRA weights.
-    def _init_weights(self): # Llama-2-7B: 32 layers × [self_attn(4), mlp(3)] × [A,B]
+    def _init_weights(self):
+        """
+        Initialize nested dictionary for LoRA weights:
+        model.layers (32 layers × [self_attn(4), mlp(3)] × [A,B]),
+        model.embed_tokens [A,B], and lm_head [A,B].
+        """
         self.lora_weights = {
             'model': {
                 'layers': [
@@ -55,7 +73,7 @@ class LoRAModelManager:
 
     def _load_weights(self, lora_dir: str):
         path = os.path.join(lora_dir, 'adapter_model.safetensors')
-        scale = self._get_scaling(lora_dir)
+        scale = self._read_scaling(lora_dir) # Apply scaling to LoRA B weights to control adapter magnitude
 
         with safe_open(path, framework='pt') as f:
             for key in f.keys():
@@ -75,7 +93,6 @@ class LoRAModelManager:
 
                     t = f.get_tensor(key)
 
-                    # Apply scaling to LoRA B weights to control adapter magnitude
                     if kind == 'lora_B':
                         t = t * scale
 
@@ -88,7 +105,6 @@ class LoRAModelManager:
                     emb = parts[4]  # 'lora_embedding_A' or 'lora_embedding_B'
                     t = f.get_tensor(key)
 
-                    # Apply scaling to LoRA B weights to control adapter magnitude
                     if emb.endswith('_B'):
                         t = t * scale
                     
@@ -101,7 +117,6 @@ class LoRAModelManager:
                     kind = parts[3]
                     t = f.get_tensor(key)
 
-                    # Apply scaling to LoRA B weights to control adapter magnitude
                     if kind == 'lora_B':
                         t = t * scale
 
@@ -112,7 +127,7 @@ class LoRAModelManager:
                     raise ValueError(f"Unexpected key: {key}")
                 
     # Compute scaling factor from adapter_config.json (alpha / rank)
-    def _get_scaling(self,lora_dir: str) -> float:
+    def _read_scaling(self,lora_dir: str) -> float:
         fname = "adapter_config.json"
         p = os.path.join(lora_dir, fname)
         if os.path.exists(p):
@@ -135,8 +150,34 @@ class LoRAModelManager:
 
     def get_lm_head_AB(self) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         return tuple(self.lora_weights['lm_head'])
-    
-                     
+
+
+def inspect_safetensors(lora_dir: str):
+    """
+    Inspects a safetensors file and prints its metadata and tensor keys.
+
+    Args:
+        lora_dir (str): Directory containing 'adapter_model.safetensors'.
+    """
+    safetensors_path = os.path.join(lora_dir, 'adapter_model.safetensors')
+    if not os.path.exists(safetensors_path):
+        print(f"Error: File not found at {safetensors_path}")
+        return
+
+    print(f"Inspecting safetensors file: {safetensors_path}")
+    with safe_open(safetensors_path, framework="pt") as f:
+        print("\n--- Metadata ---")
+        for k, v in f.metadata().items():
+            print(f"  {k}: {v}")
+
+        print("\n--- Tensor Keys ---")
+        for key in f.keys():
+            t = f.get_tensor(key)
+            print(f"  {key}: shape={tuple(t.shape)}, dtype={t.dtype}")
+    print("-------------------\n")
+
+
+
 def main():
     # 1) Download LoRA adapter
     repo_id = "yard1/llama-2-7b-sql-lora-test"
@@ -146,7 +187,10 @@ def main():
     print(f"Adapter downloaded to:\n{lora_dir}")
     print("====================================================================")
 
-    # 2) Instantiate manager and check top-level keys
+    # 2) Inspect LoRA adapter
+    inspect_safetensors(lora_dir=lora_dir)
+
+    # 3) Instantiate manager and check top-level keys
     mgr = LoRAModelManager(lora_dir=lora_dir)
     test(mgr=mgr)
 

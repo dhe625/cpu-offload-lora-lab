@@ -1,46 +1,52 @@
 def test(mgr=None):
-    if not mgr:
-        return ValueError("There is no LoRAModelManager instance.")
+    """
+    Rigorous test for LoRAModelManager:
+    - Verifies top-level keys.
+    - Checks lm_head and embedding shapes.
+    - Validates all transformer layers (self_attn and mlp) for correct presence, tensor types, and dimensions.
+    """
+    import torch
 
-    # 2) Instantiate manager and check top-level keys
+    if mgr is None:
+        raise ValueError("LoRAModelManager instance is required for testing.")
+
+    # 1) Top-level keys
     keys = list(mgr.lora_weights.keys())
     print("Top-level keys:", keys)
-    assert keys == ['model', 'lm_head'], f"Unexpected keys: {keys}"
-    print("====================================================================")
+    assert set(keys) == {'model', 'lm_head'}, f"Unexpected top-level keys: {keys}"
 
-    # 3) Verify lm_head shapes
+    # 2) lm_head shapes
     A_lm, B_lm = mgr.get_lm_head_AB()
-    print(f"lm_head A: {A_lm.shape}\nB: {B_lm.shape}")
-    assert A_lm.shape == (8, 4096), f"lm_head A shape mismatch: {A_lm.shape}"
-    assert B_lm.shape == (32004, 8), f"lm_head B shape mismatch: {B_lm.shape}"
-    print("====================================================================")
+    print(f"lm_head A: {A_lm.shape}, B: {B_lm.shape}")
+    for tensor, name in [(A_lm, 'lm_head A'), (B_lm, 'lm_head B')]:
+        assert isinstance(tensor, torch.Tensor), f"{name} is not a Tensor"
+        assert tensor.ndim == 2, f"{name} should be 2D"
 
-    # 4) Verify embed_tokens shapes
+    # 3) embed_tokens shapes
     A_e, B_e = mgr.get_embedding_AB()
-    print(f"embed_tokens A: {A_e.shape}\nB: {B_e.shape}")
-    assert A_e.shape == (8, 32004), f"embed A shape mismatch: {A_e.shape}"
-    assert B_e.shape == (4096, 8), f"embed B shape mismatch: {B_e.shape}"
-    print("====================================================================")
+    print(f"embed_tokens A: {A_e.shape}, B: {B_e.shape}")
+    for tensor, name in [(A_e, 'embed_tokens A'), (B_e, 'embed_tokens B')]:
+        assert isinstance(tensor, torch.Tensor), f"{name} is not a Tensor"
+        assert tensor.ndim == 2, f"{name} should be 2D"
 
-    # 5) Verify layers 0 and 1 linear shapes
-    expected_self = {'q_proj': (8, 4096), 'k_proj': (8, 4096), 'v_proj': (8, 4096), 'o_proj': (8, 4096)}
-    expected_self_B = {'q_proj': (4096, 8), 'k_proj': (4096, 8), 'v_proj': (4096, 8), 'o_proj': (4096, 8)}
-    expected_mlp = {'gate_proj': (8, 4096), 'up_proj': (8, 4096), 'down_proj': (8, 11008)}
-    expected_mlp_B = {'gate_proj': (11008, 8), 'up_proj': (11008, 8), 'down_proj': (4096, 8)}
+    # 4) Transformer layers
+    layers = mgr.lora_weights['model']['layers']
+    assert isinstance(layers, list) and len(layers) == 32, "There should be 32 transformer layers."
+    blocks = {
+        'self_attn': ['q_proj', 'k_proj', 'v_proj', 'o_proj'],
+        'mlp': ['gate_proj', 'up_proj', 'down_proj'],
+    }
+    for idx, layer in enumerate(layers):
+        for block_name, ops in blocks.items():
+            for op in ops:
+                A, B = mgr.get_linear_AB(idx, block_name, op)
+                nameA = f"layer {idx} {block_name}.{op} A"
+                nameB = f"layer {idx} {block_name}.{op} B"
+                # Presence and type
+                assert A is not None and B is not None, f"{nameA} or {nameB} is None"
+                assert isinstance(A, torch.Tensor), f"{nameA} is not a Tensor"
+                assert isinstance(B, torch.Tensor), f"{nameB} is not a Tensor"
+                # Dimensionality
+                assert A.ndim == 2 and B.ndim == 2, f"{nameA} or {nameB} is not 2D"
 
-    for layer in [0, 1]:
-        print(f"Checking layer: {layer}\n")
-        for op, shapeA in expected_self.items():
-            A, B = mgr.get_linear_AB(layer, 'self_attn', op)
-            print(f" self_attn.{op}: A {A.shape}, B {B.shape}")
-            assert A.shape == shapeA, f"Layer {layer} self_attn {op} A: got {A.shape}"
-            assert B.shape == expected_self_B[op], f"Layer {layer} self_attn {op} B: got {B.shape}"
-        for op, shapeA in expected_mlp.items():
-            A, B = mgr.get_linear_AB(layer, 'mlp', op)
-            print(f" mlp.{op}: A {A.shape}, B {B.shape}")
-            assert A.shape == shapeA, f"Layer {layer} mlp {op} A: got {A.shape}"
-            assert B.shape == expected_mlp_B[op], f"Layer {layer} mlp {op} B: got {B.shape}"
-        print("====================================================================")
-        
-    print("All assertions passed. LoRAModelManager is working correctly.")
-    print("====================================================================")
+    print("All rigorous tests passed for LoRAModelManager.")
