@@ -13,7 +13,7 @@ def test(mgr=None):
     # 1) Top-level keys
     keys = list(mgr.lora_weights.keys())
     print("Top-level keys:", keys)
-    assert set(keys) == {'model', 'lm_head'}, f"Unexpected top-level keys: {keys}"
+    assert set(keys) == {'layers', 'embed_tokens', 'lm_head'}, f"Unexpected top-level keys: {keys}"
 
     # 2) lm_head shapes
     A_lm, B_lm = mgr.get_lm_head_AB()
@@ -30,7 +30,7 @@ def test(mgr=None):
         assert tensor.ndim == 2, f"{name} should be 2D"
 
     # 4) Transformer layers
-    layers = mgr.lora_weights['model']['layers']
+    layers = mgr.lora_weights['layers']
     assert isinstance(layers, list) and len(layers) == 32, "There should be 32 transformer layers."
     blocks = {
         'self_attn': ['q_proj', 'k_proj', 'v_proj', 'o_proj'],

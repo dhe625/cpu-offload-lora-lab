@@ -1,10 +1,9 @@
 """
-LoRA adapter loader script.
+LoRA Adapter Loader
 
-This script provides:
-- LoRAModelManager: loads and manages LoRA weights from safetensors files.
-- inspect_safetensors: introspects a safetensors file, printing metadata and tensor shapes.
-- CLI entry point: downloads a LoRA adapter, inspects it, and runs basic tests.
+Provides a singleton manager for loading and accessing LoRA A/B weights 
+from safetensors files, a utility to inspect adapter_model.safetensors, 
+and a CLI entry point to download and test a LoRA adapter.
 """
 
 import os
@@ -20,126 +19,117 @@ from utils import test
 
 class LoRAModelManager:
     """
-    Manages the loading and access of LoRA (Low-Rank Adaptation) weights from safetensors files.
+    Singleton manager for LoRA weights.
 
-    This class is implemented as a singleton to ensure that LoRA weights are loaded only once
-    and shared across the application. It provides methods to retrieve LoRA A and B matrices
-    for different parts of a transformer model, including linear layers, embedding layers,
-    and the language model head.
+    Loads LoRA A and B tensors from a safetensors file into a nested dictionary:
+      - layers: per-layer [self_attn, mlp] blocks with [q,k,v,o] or [gate,up,down] weights.
+      - embed_tokens: LoRA embedding weights.
+      - lm_head: LoRA head weights.
 
-    The LoRA weights are stored in a nested dictionary structure, organized by model
-    components (e.g., layers, self_attn, mlp, embed_tokens, lm_head). Scaling factors
-    (lora_alpha / r) are applied to the LoRA B weights during loading.
-
-    Attributes:
-        lora_weights (dict): A nested dictionary holding the loaded LoRA A and B tensors.
-                             The structure mirrors the model's architecture for easy access.
+    Methods:
+      get_linear_AB(layer_idx, block, op) -> (A, B)
+      get_embedding_AB() -> (A, B)
+      get_lm_head_AB() -> (A, B)
     """
-
     _instance = None
 
-    def __new__(cls, lora_dir: str = None):
+    def __init__(self):
+        raise RuntimeError('Call instance() instead')
+
+    @classmethod
+    def getInstance(cls, lora_dir: str = None, device: Optional[torch.device] = None):
+        # Instantiate on first call using bypass __init__
         if cls._instance is None:
-            if not lora_dir:
-                raise ValueError("First init requires lora_dir.")
-            cls._instance = super().__new__(cls)
-            cls._instance._lora_dir = lora_dir
+            if lora_dir is None:
+                raise ValueError("lora_dir must be provided on the first call.")
+            cls._instance = cls.__new__(cls)
+            cls._instance._device = device or torch.device('cpu')
             cls._instance._init_weights()
             cls._instance._load_weights(lora_dir)
-        else:
-            if lora_dir is not None and lora_dir != cls._instance._lora_dir:
-                raise ValueError(f"LoRAModelManager already initialized with lora_dir={cls._instance._lora_dir}, cannot reinitialize with different lora_dir={lora_dir}")
         return cls._instance
 
-    # Initializes the nested dictionary structure to store LoRA weights.
     def _init_weights(self):
-        """
-        Initialize nested dictionary for LoRA weights:
-        model.layers (32 layers × [self_attn(4), mlp(3)] × [A,B]),
-        model.embed_tokens [A,B], and lm_head [A,B].
-        """
+        """Initialize storage structure for LoRA weights."""
         self.lora_weights = {
-            'model': {
-                'layers': [
-                    [
-                        [[None, None] for _ in range(4)],  # self_attn: q,k,v,o
-                        [[None, None] for _ in range(3)]   # mlp: gate,up,down
-                    ] for _ in range(32)
-                ],
-                'embed_tokens': [None, None]
-            },
+            'layers': [
+                [
+                    [[None, None] for _ in range(4)],   # self_attn: q,k,v,o
+                    [[None, None] for _ in range(3)]    # mlp: gate,up,down
+                ] for _ in range(32)                    # num_layer: 32
+            ],
+            'embed_tokens': [None, None],
             'lm_head': [None, None]
         }
 
     def _load_weights(self, lora_dir: str):
+        """Load and scale LoRA tensors from adapter_model.safetensors."""
         path = os.path.join(lora_dir, 'adapter_model.safetensors')
         scale = self._read_scaling(lora_dir) # Apply scaling to LoRA B weights to control adapter magnitude
 
         with safe_open(path, framework='pt') as f:
             for key in f.keys():
+                # print(key) # (optional)
                 parts = key.split('.')
 
-                # 1) Load LoRA weights for transformer layers (e.g., model.layers.0.self_attn.q_proj.lora_A)
+                # Layer weights (e.g., base_model.model.model.layers.0.self_attn.q_proj.lora_A)
                 if parts[3] == 'layers':
                     # TODO: Extract layer index, block type, op name, and kind from parts
-                    idx = ...
-                    block = ...   # 'self_attn' or 'mlp'
-                    op = ...      # 'q_proj'
-                    kind = ...    # 'lora_A' or 'lora_B'
-
-                    # Determine operations based on block type ('self_attn' or 'mlp')
-                    ops = [...] if block == 'self_attn' else [...]
-                    bt = 0 if block == 'self_attn' else 1
-                    op_idx = ops.index(op)
+                    layer_idx = ...
+                    block_type = ...
+                    op_name = ...
+                    adapter_type = ...
+                    
+                    # Determine indices based on extracted information
+                    ops = ['q_proj','k_proj','v_proj','o_proj'] if block_type == 'self_attn' else ['gate_proj','up_proj','down_proj']
+                    block_idx = 0 if block_type == 'self_attn' else 1
+                    op_idx = ops.index(op_name)
+                    adapter_idx = 0 if adapter_type == 'lora_A' else 1
 
                     # Load tensor from safetensors file
-                    t = f.get_tensor(key)
+                    tensor = f.get_tensor(key)
 
-                    # TODO: If this is a B-weight, apply scaling factor
+                    # TODO: Apply scaling factor to t if this is a lora_B
+                    ...
+
+                    # Move tensor to target device
+                    tensor = tensor.to(self._device)
+
+                    # TODO: Store tensor in self.lora_weights
+                    ...
+
+                # Embedding weights
+                elif parts[3] == 'embed_tokens':
+                    emb = parts[4]  # 'lora_embedding_A' or 'lora_embedding_B'
+                    tensor = f.get_tensor(key)
+
+                    if emb.endswith('_B'):
+                        tensor = tensor * scale
+                    
+                    tensor = tensor.to(self._device)
+                    
+                    adapter_idx = 0 if emb.endswith('_A') else 1
+                    self.lora_weights['embed_tokens'][adapter_idx] = tensor
+
+                # LM head weights
+                elif parts[2] == 'lm_head':
+                    adapter_type = parts[3]
+                    tensor = f.get_tensor(key)
+
+                    # TODO: Apply scaling factor to t if this is a lora_B
+                    ...
+
+                    tensor = tensor.to(self._device)
+
+                    # TODO: Determine an index based on adapter_type
                     ...
 
                     # TODO: Store tensor in self.lora_weights
-                    w_idx = 0 if kind == 'lora_A' else 1
-                    self.lora_weights[...][...][...][...][...][...] = t
-
-                # 2) Load LoRA weights for embedding layer entries
-                elif parts[3] == 'embed_tokens':
-                    # TODO: Determine A or B embedding from parts[4] (emb)
-                    emb = ...
-
-                    # Load tensor
-                    t = f.get_tensor(key)
-
-                    # TODO: Apply scaling for B embeddings
                     ...
-
-                    # TODO: Compute index i (0 for A, 1 for B)
-                    i = ...
-
-                    # TODO: Store in self.lora_weights
-                    self.lora_weights[...][...][i] = t
-
-                # 3) Load LoRA weights for language model head
-                elif parts[2] == 'lm_head':
-                    # TODO: Determine kind ('lora_A' or 'lora_B') from parts[3]
-                    kind = ...
-
-                    # Load tensor
-                    t = f.get_tensor(key)
-
-                    # TODO: Apply scaling if B-weight
-                    ...
-
-                    # TODO: Compute i (0 for A, 1 for B)
-                    i = ...
-
-                    # TODO: Store in self.lora_weights
-                    self.lora_weights[...][...] = t
                 else:
                     raise ValueError(f"Unexpected key: {key}")
                 
-    # Compute scaling factor from adapter_config.json (alpha / rank)
     def _read_scaling(self,lora_dir: str) -> float:
+        """Read adapter_config.json and compute scale (alpha/r); default to 1.0."""
         fname = "adapter_config.json"
         p = os.path.join(lora_dir, fname)
         if os.path.exists(p):
@@ -152,24 +142,27 @@ class LoRAModelManager:
         return 1.0
 
     def get_linear_AB(self, layer_idx: int, block: str, op: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return (A, B) for a given layer, block, and operation."""
         bt = 0 if block == 'self_attn' else 1
         ops = ['q_proj','k_proj','v_proj','o_proj'] if block == 'self_attn' else ['gate_proj','up_proj','down_proj']
         op_idx = ops.index(op)
-        return tuple(self.lora_weights['model']['layers'][layer_idx][bt][op_idx])
+        return tuple(self.lora_weights['layers'][layer_idx][bt][op_idx])
 
     def get_embedding_AB(self) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        return tuple(self.lora_weights['model']['embed_tokens'])
+        """Return (A, B) tensors for embedding layer."""
+        return tuple(self.lora_weights['embed_tokens'])
 
     def get_lm_head_AB(self) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Return (A, B) tensors for language model head."""
         return tuple(self.lora_weights['lm_head'])
 
 
 def inspect_safetensors(lora_dir: str):
     """
-    Inspects a safetensors file and prints its metadata and tensor keys.
+    Print metadata and tensor info from adapter_model.safetensors.
 
     Args:
-        lora_dir (str): Directory containing 'adapter_model.safetensors'.
+        lora_dir (str): Directory containing adapter_model.safetensors.
     """
     safetensors_path = os.path.join(lora_dir, 'adapter_model.safetensors')
     if not os.path.exists(safetensors_path):
@@ -191,19 +184,20 @@ def inspect_safetensors(lora_dir: str):
 
 
 def main():
-    # 1) Download LoRA adapter
+    # Download LoRA adapter
     repo_id = "yard1/llama-2-7b-sql-lora-test"
     print(f"Downloading LoRA adapter from '{repo_id}'...")
     lora_dir = snapshot_download(repo_id=repo_id)
+    lora_device = "cuda:0" if torch.cuda.is_available() else "cpu"
     print("====================================================================")
     print(f"Adapter downloaded to:\n{lora_dir}")
     print("====================================================================")
 
-    # 2) Inspect LoRA adapter
-    inspect_safetensors(lora_dir=lora_dir)
+    # Inspect adapter (optional)
+    # inspect_safetensors(lora_dir=lora_dir)
 
-    # 3) Instantiate manager and check top-level keys
-    mgr = LoRAModelManager(lora_dir=lora_dir)
+    # Instantiate manager and run tests
+    mgr = LoRAModelManager.getInstance(lora_dir=lora_dir, device=lora_device)
     test(mgr=mgr)
 
 if __name__ == '__main__':
