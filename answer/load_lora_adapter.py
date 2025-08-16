@@ -1,9 +1,17 @@
 """
 LoRA Adapter Loader
 
-Provides a singleton manager for loading and accessing LoRA A/B weights 
-from safetensors files, a utility to inspect adapter_model.safetensors, 
-and a CLI entry point to download and test a LoRA adapter.
+This module provides utilities for working with LoRA adapters:
+  - A singleton manager (`LoRAModelManager`) to load and access LoRA A/B weights 
+    from `adapter_model.safetensors`.
+  - A utility (`inspect_safetensors`) to inspect the safetensors file.
+  - A test function (`test`) to validate correctness of loaded weights.
+  - A CLI entry point (`main`) to download and verify a sample LoRA adapter.
+
+LoRA weights are stored in a nested dictionary structure with:
+  - Per-layer attention and MLP blocks
+  - Embedding weights
+  - LM head weights
 """
 
 import os
@@ -19,24 +27,44 @@ class LoRAModelManager:
     """
     Singleton manager for LoRA weights.
 
-    Loads LoRA A and B tensors from a safetensors file into a nested dictionary:
-      - layers: per-layer [self_attn, mlp] blocks with [q,k,v,o] or [gate,up,down] weights.
-      - embed_tokens: LoRA embedding weights.
-      - lm_head: LoRA head weights.
+    Responsibilities:
+      - Load LoRA A and B tensors from `adapter_model.safetensors`.
+      - Organize them into a structured dictionary for easy access.
+      - Apply scaling to B weights using values from `adapter_config.json`.
 
-    Methods:
-      get_linear_AB(layer_idx, block, op) -> (A, B)
-      get_embedding_AB() -> (A, B)
-      get_lm_head_AB() -> (A, B)
+    Data structure:
+      lora_weights = {
+        'layers': [
+          [ [ [A, B], ... ],   # self_attn: q_proj, k_proj, v_proj, o_proj
+            [ [A, B], ... ]    # mlp: gate_proj, up_proj, down_proj
+          ] for _ in range(num_layers)
+        ],
+        'embed_tokens': [A, B],
+        'lm_head': [A, B]
+      }
+
+    Public methods:
+      - get_linear_AB(layer_idx, block, op) -> (A, B)
+      - get_embedding_AB() -> (A, B)
+      - get_lm_head_AB() -> (A, B)
     """
     _instance = None
 
     def __init__(self):
-        raise RuntimeError('Call instance() instead')
+        raise RuntimeError('Use LoRAModelManager.getInstance() instead of direct construction.')
 
     @classmethod
     def getInstance(cls, lora_dir: str = None):
-        # Instantiate on first call using bypass __init__
+        """
+        Return the singleton instance of LoRAModelManager.
+
+        Args:
+            lora_dir (str, optional): Directory containing `adapter_model.safetensors`.
+                                      Must be provided the first time.
+
+        Returns:
+            LoRAModelManager: singleton instance
+        """
         if cls._instance is None:
             if lora_dir is None:
                 raise ValueError("lora_dir must be provided on the first call.")
@@ -59,20 +87,27 @@ class LoRAModelManager:
         }
 
     def _load_weights(self, lora_dir: str):
-        """Load and scale LoRA tensors from adapter_model.safetensors."""
+        """
+        Load LoRA weights from adapter_model.safetensors.
+
+        - Applies scaling (alpha/r) from adapter_config.json to B weights.
+        - Populates `self.lora_weights`.
+        """
         path = os.path.join(lora_dir, 'adapter_model.safetensors')
-        scale = self._read_scaling(lora_dir) # Apply scaling to LoRA B weights to control adapter magnitude
+        scale = self._read_scaling(lora_dir) # scaling factor for B matrices
 
         with safe_open(path, framework='pt') as f:
             for key in f.keys():
                 parts = key.split('.')
 
-                # Layer weights
+                # -------------------------
+                # Transformer layer weights
+                # -------------------------
                 if parts[3] == 'layers':
-                    layer_idx = int(parts[4])
-                    block_type = parts[5]
-                    op_name = parts[6]
-                    adapter_type = parts[7]
+                    layer_idx = int(parts[4])   # which transformer layer
+                    block_type = parts[5]       # self_attn or mlp
+                    op_name = parts[6]          # q_proj, k_proj, etc.
+                    adapter_type = parts[7]     # lora_A or lora_B
                     
                     ops = ['q_proj','k_proj','v_proj','o_proj'] if block_type == 'self_attn' else ['gate_proj','up_proj','down_proj']
                     block_idx = 0 if block_type == 'self_attn' else 1
@@ -86,7 +121,9 @@ class LoRAModelManager:
 
                     self.lora_weights['layers'][layer_idx][block_idx][op_idx][adapter_idx] = tensor
 
+                # -------------------------
                 # Embedding weights
+                # -------------------------
                 elif parts[3] == 'embed_tokens':
                     emb = parts[4]
                     tensor = f.get_tensor(key)
@@ -97,7 +134,9 @@ class LoRAModelManager:
                     adapter_idx = 0 if emb.endswith('_A') else 1
                     self.lora_weights['embed_tokens'][adapter_idx] = tensor
 
+                # -------------------------
                 # LM head weights
+                # -------------------------
                 elif parts[2] == 'lm_head':
                     adapter_type = parts[3]
                     tensor = f.get_tensor(key)
@@ -107,11 +146,17 @@ class LoRAModelManager:
 
                     adapter_idx = 0 if adapter_type == 'lora_A' else 1
                     self.lora_weights['lm_head'][adapter_idx] = tensor
+
                 else:
                     raise ValueError(f"Unexpected key: {key}")
                 
     def _read_scaling(self,lora_dir: str) -> float:
-        """Read adapter_config.json and compute scale (alpha/r); default to 1.0."""
+        """
+        Read scaling factor from adapter_config.json.
+
+        Scale = alpha / r
+        If missing, defaults to 1.0.
+        """
         fname = "adapter_config.json"
         p = os.path.join(lora_dir, fname)
         if os.path.exists(p):
@@ -124,7 +169,17 @@ class LoRAModelManager:
         return 1.0
 
     def get_linear_AB(self, layer_idx: int, block: str, op: str) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return (A, B) for a given layer, block, and operation."""
+        """
+        Retrieve (A, B) tensors for a given linear projection.
+
+        Args:
+            layer_idx (int): Transformer layer index (0–31).
+            block (str): 'self_attn' or 'mlp'.
+            op (str): Operation name (e.g., 'q_proj', 'up_proj').
+
+        Returns:
+            (torch.Tensor, torch.Tensor): LoRA A and B matrices.
+        """
         bt = 0 if block == 'self_attn' else 1
         ops = ['q_proj','k_proj','v_proj','o_proj'] if block == 'self_attn' else ['gate_proj','up_proj','down_proj']
         op_idx = ops.index(op)
@@ -141,10 +196,11 @@ class LoRAModelManager:
 
 def inspect_safetensors(lora_dir: str):
     """
-    Print metadata and tensor info from adapter_model.safetensors.
+    Inspect the contents of `adapter_model.safetensors`.
 
-    Args:
-        lora_dir (str): Directory containing adapter_model.safetensors.
+    Prints:
+      - Metadata
+      - Keys, shapes, and dtypes of all tensors
     """
     safetensors_path = os.path.join(lora_dir, 'adapter_model.safetensors')
     if not os.path.exists(safetensors_path):
@@ -165,10 +221,16 @@ def inspect_safetensors(lora_dir: str):
 
 def test(mgr=None):
     """
-    Rigorous test for LoRAModelManager:
-    - Verifies top-level keys.
-    - Checks lm_head and embedding shapes.
-    - Validates all transformer layers (self_attn and mlp) for correct presence, tensor types, and dimensions.
+    Rigorous validation test for LoRAModelManager.
+
+    Verifies:
+      1. Presence of top-level keys
+      2. lm_head A/B tensors: type and shape
+      3. embed_tokens A/B tensors: type and shape
+      4. Each transformer layer's attention and MLP ops:
+         - A and B exist
+         - Are torch.Tensors
+         - Are 2D matrices
     """
     import torch
 
@@ -205,24 +267,28 @@ def test(mgr=None):
         for block_name, ops in blocks.items():
             for op in ops:
                 A, B = mgr.get_linear_AB(idx, block_name, op)
-                nameA = f"layer {idx} {block_name}.{op} A"
-                nameB = f"layer {idx} {block_name}.{op} B"
-                # Presence and type
-                assert A is not None and B is not None, f"{nameA} or {nameB} is None"
-                assert isinstance(A, torch.Tensor), f"{nameA} is not a Tensor"
-                assert isinstance(B, torch.Tensor), f"{nameB} is not a Tensor"
-                # Dimensionality
-                assert A.ndim == 2 and B.ndim == 2, f"{nameA} or {nameB} is not 2D"
+                # Validate presence and types
+                assert A is not None and B is not None
+                assert isinstance(A, torch.Tensor)
+                assert isinstance(B, torch.Tensor)
+                # Validate dimensions
+                assert A.ndim == 2 and B.ndim == 2
 
     print("All rigorous tests passed for LoRAModelManager.")
 
 
 def main():
-    # Download LoRA adapter
+    """
+    CLI entry point.
+
+    - Downloads a sample LoRA adapter from HuggingFace Hub
+    - Inspects the safetensors file
+    - Instantiates LoRAModelManager
+    - Runs validation tests
+    """
     repo_id = "yard1/llama-2-7b-sql-lora-test"
     print(f"Downloading LoRA adapter from '{repo_id}'...")
     lora_dir = snapshot_download(repo_id=repo_id)
-    # lora_dir = "/root/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c"
     print("====================================================================")
     print(f"Adapter downloaded to:\n{lora_dir}")
     print("====================================================================")

@@ -1,52 +1,53 @@
-def test(mgr=None):
-    """
-    Rigorous test for LoRAModelManager:
-    - Verifies top-level keys.
-    - Checks lm_head and embedding shapes.
-    - Validates all transformer layers (self_attn and mlp) for correct presence, tensor types, and dimensions.
-    """
-    import torch
+def wrap_model(model, lora_dir: str, lora_mode: str, device: str, skip_embed: bool):
+    from load_lora_adapter import LoRAModelManager
 
-    if mgr is None:
-        raise ValueError("LoRAModelManager instance is required for testing.")
+    linear_ops = [
+        ("self_attn", "q_proj"), ("self_attn", "k_proj"),
+        ("self_attn", "v_proj"), ("self_attn", "o_proj"),
+        ("mlp", "gate_proj"), ("mlp", "up_proj"), ("mlp", "down_proj"),
+    ]
+    lora_manager = LoRAModelManager.getInstance(lora_dir=lora_dir)
 
-    # 1) Top-level keys
-    keys = list(mgr.lora_weights.keys())
-    print("Top-level keys:", keys)
-    assert set(keys) == {'layers', 'embed_tokens', 'lm_head'}, f"Unexpected top-level keys: {keys}"
+    if lora_mode == "single_stream":
+        from layers.lora_single_stream import BaseLayerWithLoRASingleStream, VocabEmbeddingWithLoRASingleStream
+        LayerWrapper = BaseLayerWithLoRASingleStream
+        EmbeddingWrapper = VocabEmbeddingWithLoRASingleStream
+    elif lora_mode == "multi_stream":
+        from layers.lora_multi_stream import BaseLayerWithLoRAMultiStream, VocabEmbeddingWithLoRAMultiStream
+        LayerWrapper = BaseLayerWithLoRAMultiStream
+        EmbeddingWrapper = VocabEmbeddingWithLoRAMultiStream
+    elif lora_mode == "cpu":
+        from layers.lora_cpu import BaseLayerWithLoRACPU
+        from layers.lora_single_stream import VocabEmbeddingWithLoRASingleStream
+        LayerWrapper = BaseLayerWithLoRACPU
+        EmbeddingWrapper = VocabEmbeddingWithLoRASingleStream
+    else:
+        raise ValueError(f"Unsupported lora_mode: {lora_mode}")
 
-    # 2) lm_head shapes
-    A_lm, B_lm = mgr.get_lm_head_AB()
-    print(f"lm_head A: {A_lm.shape}, B: {B_lm.shape}")
-    for tensor, name in [(A_lm, 'lm_head A'), (B_lm, 'lm_head B')]:
-        assert isinstance(tensor, torch.Tensor), f"{name} is not a Tensor"
-        assert tensor.ndim == 2, f"{name} should be 2D"
+    for layer_idx, layer in enumerate(model.model.layers):
+        for block_name, op_name in linear_ops:
+            target_module = getattr(layer, block_name)
+            base_module = getattr(target_module, op_name)
+            lora_A, lora_B = lora_manager.get_linear_AB(layer_idx, block_name, op_name)
+            if lora_mode != "cpu":
+                lora_A = lora_A.to(device)
+                lora_B = lora_B.to(device)
+            wrapped_module = LayerWrapper(base_module, lora_A, lora_B)
+            setattr(target_module, op_name, wrapped_module)
 
-    # 3) embed_tokens shapes
-    A_e, B_e = mgr.get_embedding_AB()
-    print(f"embed_tokens A: {A_e.shape}, B: {B_e.shape}")
-    for tensor, name in [(A_e, 'embed_tokens A'), (B_e, 'embed_tokens B')]:
-        assert isinstance(tensor, torch.Tensor), f"{name} is not a Tensor"
-        assert tensor.ndim == 2, f"{name} should be 2D"
+    if not skip_embed:
+        base_embedding = model.model.embed_tokens
+        lora_A, lora_B = lora_manager.get_embedding_AB()
+        if lora_A is not None and lora_B is not None:
+            lora_A = lora_A.to(device)
+            lora_B = lora_B.to(device)
+            model.model.embed_tokens = EmbeddingWrapper(base_embedding, lora_A, lora_B)
 
-    # 4) Transformer layers
-    layers = mgr.lora_weights['layers']
-    assert isinstance(layers, list) and len(layers) == 32, "There should be 32 transformer layers."
-    blocks = {
-        'self_attn': ['q_proj', 'k_proj', 'v_proj', 'o_proj'],
-        'mlp': ['gate_proj', 'up_proj', 'down_proj'],
-    }
-    for idx, layer in enumerate(layers):
-        for block_name, ops in blocks.items():
-            for op in ops:
-                A, B = mgr.get_linear_AB(idx, block_name, op)
-                nameA = f"layer {idx} {block_name}.{op} A"
-                nameB = f"layer {idx} {block_name}.{op} B"
-                # Presence and type
-                assert A is not None and B is not None, f"{nameA} or {nameB} is None"
-                assert isinstance(A, torch.Tensor), f"{nameA} is not a Tensor"
-                assert isinstance(B, torch.Tensor), f"{nameB} is not a Tensor"
-                # Dimensionality
-                assert A.ndim == 2 and B.ndim == 2, f"{nameA} or {nameB} is not 2D"
-
-    print("All rigorous tests passed for LoRAModelManager.")
+    base_lm_head = model.lm_head
+    lora_A, lora_B = lora_manager.get_lm_head_AB()
+    if lora_A is not None and lora_B is not None:
+        if lora_mode != "cpu":
+            lora_A = lora_A.to(device)
+            lora_B = lora_B.to(device)
+        wrapped_lm_head = LayerWrapper(base_lm_head, lora_A, lora_B)
+        model.lm_head = wrapped_lm_head

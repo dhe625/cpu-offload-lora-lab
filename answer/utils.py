@@ -1,5 +1,4 @@
 def wrap_model(model, lora_dir: str, lora_mode: str, device: str, skip_embed: bool):
-    # Lazy import heavy dependencies
     from load_lora_adapter import LoRAModelManager
 
     linear_ops = [
@@ -9,7 +8,6 @@ def wrap_model(model, lora_dir: str, lora_mode: str, device: str, skip_embed: bo
     ]
     lora_manager = LoRAModelManager.getInstance(lora_dir=lora_dir)
 
-    # Select LoRA wrapper implementations based on mode
     if lora_mode == "single_stream":
         from layers.lora_single_stream import BaseLayerWithLoRASingleStream, VocabEmbeddingWithLoRASingleStream
         LayerWrapper = BaseLayerWithLoRASingleStream
@@ -34,7 +32,6 @@ def wrap_model(model, lora_dir: str, lora_mode: str, device: str, skip_embed: bo
             if lora_mode != "cpu":
                 lora_A = lora_A.to(device)
                 lora_B = lora_B.to(device)
-
             wrapped_module = LayerWrapper(base_module, lora_A, lora_B)
             setattr(target_module, op_name, wrapped_module)
 
@@ -44,7 +41,6 @@ def wrap_model(model, lora_dir: str, lora_mode: str, device: str, skip_embed: bo
         if lora_A is not None and lora_B is not None:
             lora_A = lora_A.to(device)
             lora_B = lora_B.to(device)
-
             model.model.embed_tokens = EmbeddingWrapper(base_embedding, lora_A, lora_B)
 
     base_lm_head = model.lm_head
@@ -53,6 +49,5 @@ def wrap_model(model, lora_dir: str, lora_mode: str, device: str, skip_embed: bo
         if lora_mode != "cpu":
             lora_A = lora_A.to(device)
             lora_B = lora_B.to(device)
-
         wrapped_lm_head = LayerWrapper(base_lm_head, lora_A, lora_B)
         model.lm_head = wrapped_lm_head

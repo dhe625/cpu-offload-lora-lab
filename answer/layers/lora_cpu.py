@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import custom_kernel.cuda_utils as cu  # wait, set_flag, (clear_flag)
+import custom_kernel.cuda_utils as cu  # wait(), set_flag(), (clear_flag)
 
 p = torch.cuda.nvtx.range_push
 q = torch.cuda.nvtx.range_pop
@@ -35,13 +35,9 @@ class BaseLayerWithLoRACPU(nn.Module):
         self.flag_one = torch.ones(1, device="cuda", dtype=torch.int32)
 
 
-
     def forward(self, x: torch.Tensor):
         p("BaseLayerWithLoRACPU::forward")
         p("Shape & Views")
-        cur_stream = torch.cuda.current_stream()
-        self.flag.zero_()
-
         B, S, _ = x.shape
         N = B * S
         is_decode = True if N == B * 1 else False
@@ -49,6 +45,9 @@ class BaseLayerWithLoRACPU(nn.Module):
         x_cpu_v   = self.x_cpu[:N, :]
         cpu_out_v = self.cpu_out[:N, :]
         gpu_out_v = self.gpu_out[:N, :]
+
+        cur_stream = torch.cuda.current_stream()
+        self.flag.zero_()
         q()
 
         p("lora_stream wait defualt stream")
