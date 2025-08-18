@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# run_lora.sh
 
 clear
 
