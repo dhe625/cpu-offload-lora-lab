@@ -34,7 +34,7 @@ class BaseLayerWithLoRACPU(nn.Module):
         self.evt_add_done = torch.cuda.Event()
 
         # Pre-allocated pinned CPU / GPU work buffers (capacity can be grown if needed)
-        cap = 128
+        cap = 1024
         Din = self.lora_A.size(1)
         Dout = self.lora_B.size(0)
         cpu_dtype = self.lora_A.dtype

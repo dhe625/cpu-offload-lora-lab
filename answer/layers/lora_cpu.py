@@ -23,7 +23,7 @@ class BaseLayerWithLoRACPU(nn.Module):
         self.evt_base_done = torch.cuda.Event()
         self.evt_add_done = torch.cuda.Event()
 
-        cap = 128
+        cap = 1024
         Din  = self.lora_A.size(1)
         Dout = self.lora_B.size(0)
         cpu_dtype = self.lora_A.dtype
@@ -36,8 +36,8 @@ class BaseLayerWithLoRACPU(nn.Module):
 
 
     def forward(self, x: torch.Tensor):
-        p("BaseLayerWithLoRACPU::forward")
-        p("Shape & Views")
+        # p("BaseLayerWithLoRACPU::forward")
+        # p("Shape & Views")
         B, S, _ = x.shape
         N = B * S
         is_decode = True if N == B * 1 else False
@@ -48,56 +48,56 @@ class BaseLayerWithLoRACPU(nn.Module):
 
         cur_stream = torch.cuda.current_stream()
         self.flag.zero_()
-        q()
+        # q()
 
-        p("lora_stream wait defualt stream")
+        # p("lora_stream wait defualt stream")
         with torch.cuda.stream(self.lora_stream):
             self.evt_prev_layer_done.record(cur_stream)
             self.evt_prev_layer_done.wait(self.lora_stream)
             x_cpu_v.copy_(x.view(N, -1), non_blocking=True)
             self.evt_copy_done.record()
-        q()
+        # q()
 
-        p("main::base_linear + record")
+        # p("main::base_linear + record")
         base_out = F.linear(x, self.base.weight, self.base.bias)
         self.evt_base_done.record(cur_stream)
-        q()
+        # q()
 
         if not is_decode:
-            p("CPU Matrix Multiplication")
+            # p("CPU Matrix Multiplication")
             self.evt_copy_done.synchronize()
             torch.linalg.multi_dot([x_cpu_v, self.lora_A.t(), self.lora_B.t()], out=cpu_out_v)
-            q()
+            # q()
 
-            p("Prefill::issue gpu kernels")
+            # p("Prefill::issue gpu kernels")
             with torch.cuda.stream(self.lora_stream):
                 gpu_out_v.copy_(cpu_out_v, non_blocking=True)
                 self.evt_base_done.wait(self.lora_stream)
                 base_out.add_(gpu_out_v.view(B, S, -1))
                 self.evt_add_done.record(self.lora_stream)
-            q()
+            # q()
 
         else:
-            p("Decode::Preissue gpu kernels")
+            # p("Decode::Preissue gpu kernels")
             with torch.cuda.stream(self.lora_stream):
                 cu.wait(self.flag)
                 gpu_out_v.copy_(cpu_out_v, non_blocking=True)
                 self.evt_copy_done.wait(self.lora_stream)
                 base_out.add_(gpu_out_v.view(B, S, -1))
                 self.evt_add_done.record(self.lora_stream)
-            q()
+            # q()
             
-            p("CPU Matrix Multiplication + Set flag 0 to 1")
+            # p("CPU Matrix Multiplication + Set flag 0 to 1")
             with torch.cuda.stream(self.flag_stream):
                 self.evt_copy_done.synchronize()
                 torch.linalg.multi_dot([x_cpu_v, self.lora_A.t(), self.lora_B.t()], out=cpu_out_v)
                 self.flag.copy_(self.flag_one, non_blocking=True)    
-            q()
+            # q()
 
-        p("default stream waits lora_stream")
+        # p("default stream waits lora_stream")
         self.evt_add_done.wait(cur_stream)
-        q()
+        # q()
         
-        q()
+        # q()
 
         return base_out.contiguous()
