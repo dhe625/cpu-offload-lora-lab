@@ -41,13 +41,13 @@ class BaseLayerWithLoRACPU(nn.Module):
 
         # p("lora_stream::D2H_x_copy+record")
         with torch.cuda.stream(self.lora_stream):
-            p("D2H x copy (non_blocking)")
+            # p("D2H x copy (non_blocking)")
             x_cpu_v.copy_(x.view(N, D), non_blocking=True)
-            q()
+            # q()
 
-            p("record evt_copy_done")
+            # p("record evt_copy_done")
             self.evt_copy_done.record()
-            q()
+            # q()
         # q()
 
         # p("GPU::base_linear+record")
